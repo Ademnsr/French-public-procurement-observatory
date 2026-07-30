@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: gold
+    database: dev
+    schema: gold
+    tables:
+      - name: fact_contrat
