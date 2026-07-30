@@ -61,6 +61,10 @@ select
     offresrecues as offres_recues,
     modification_id,
     est_modification,
+    --exclus des agregats monetaires (ligne gardee dans stg_fact_contrat) :
+    --montant_anomalie signale les sentinelles (99 999 999 999,99) ; le seuil 500M
+    --ecarte les plafonds d'accords-cadres enregistres comme si c'etait une depense reelle
+    montant_anomalie is null and montant <= 500000000 as montant_fiable,
     ingestion_timestamp,
     extract_date
 from dedup
