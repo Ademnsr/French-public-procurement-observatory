@@ -39,7 +39,7 @@ select
     max(acheteur_nom) as acheteur_nom,
     count(distinct titulaire_id) as nb_fournisseurs,
     sum(montant_fournisseur) as montant_total,
-    sum(power(part_pct, 2)) as hhi,
+    round(sum(power(part_pct, 2)), 4) as hhi,
     max(part_pct) as part_top_fournisseur_pct
 from parts
 group by acheteur_id

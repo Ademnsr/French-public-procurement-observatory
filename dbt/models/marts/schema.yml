@@ -1,0 +1,25 @@
+version: 2
+
+models:
+  - name: mart_buyer_concentration
+    columns:
+      - name: acheteur_id
+        tests:
+          - unique
+          - not_null
+
+  - name: mart_buyer_supplier_monthly
+    columns:
+      - name: mois
+        tests:
+          - not_null
+      - name: acheteur_id
+        tests:
+          - not_null
+
+  - name: mart_contract_modifications
+    columns:
+      - name: uid
+        tests:
+          - unique
+          - not_null

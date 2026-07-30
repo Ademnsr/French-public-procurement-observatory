@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: stg_fact_contrat
+    columns:
+      - name: uid
+        tests:
+          - not_null
+      - name: acheteur_id
+        tests:
+          - not_null
+      - name: montant
+        tests:
+          - not_null
