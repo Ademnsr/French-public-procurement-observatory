@@ -1,2 +1,12 @@
 .DS_Store
 .env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/

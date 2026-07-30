@@ -1,0 +1,23 @@
+name: 'observatoire_marches'
+version: '1.0.0'
+
+profile: 'observatoire_marches'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+#staging en vue (simple renommage au dessus de Spectrum), marts en table
+models:
+  observatoire_marches:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
