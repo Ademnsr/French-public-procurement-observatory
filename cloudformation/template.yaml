@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Observatoire des marches publics - ingestion Bronze (Lambda), transformations
+  Silver/Gold (Glue), orchestration (Glue Workflow, EventBridge desactivee par defaut).
+  Redshift, Lake Formation et dbt restent geres hors CloudFormation (permissions
+  Lake Formation et schema externe SQL trop specifiques pour etre proprement IaC).
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: marche-france-data-lake
+  GlueDatabaseName:
+    Type: String
+    Default: observatoire_marches
+  DecpExtractDate:
+    Type: String
+    Default: "2026-07-24"
+    Description: Partition extract_date du bronze DECP a traiter par les jobs
+  SireneSnapshotDate:
+    Type: String
+    Default: "2026-07-24"
+    Description: Partition snapshot_date du bronze Sirene a traiter par les jobs
+
+Resources:
+
+  #--- Lambda : ingestion Bronze ---
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: s3-bronze-write
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                Resource: !Sub "arn:aws:s3:::${BucketName}/bronze/*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  IngestionBronzeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ingestion_bronze
+      Runtime: python3.12
+      Handler: ingestion_bronze.lambda_handler
+      Timeout: 900
+      MemorySize: 2048
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref BucketName
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: scripts/ingestion_bronze.zip
+
+  #--- Glue : role partage par les jobs et le crawler ---
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  #--- Glue : jobs Silver et Gold (bucket et dates de partition passes en arguments) ---
+  SilverDecpJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: silver_decp
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      MaxRetries: 0
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://${BucketName}/scripts/silver_decp.py"
+      DefaultArguments:
+        "--bucket": !Ref BucketName
+        "--extract_date": !Ref DecpExtractDate
+
+  SilverSireneJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: silver_sirene
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 4
+      MaxRetries: 0
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://${BucketName}/scripts/silver_sirene.py"
+      DefaultArguments:
+        "--bucket": !Ref BucketName
+        "--snapshot_date": !Ref SireneSnapshotDate
+
+  GoldFactContratJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: gold_fact_contrat
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: "4.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 4
+      MaxRetries: 0
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub "s3://${BucketName}/scripts/gold_fact_contrat.py"
+      DefaultArguments:
+        "--bucket": !Ref BucketName
+
+  #--- Glue Data Catalog : base + crawler sur Gold ---
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref GlueDatabaseName
+
+  GoldCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: crawler_gold
+      Role: !GetAtt GlueJobRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${BucketName}/gold/fact_contrat/"
+
+  #--- Orchestration : Silver (les deux jobs) puis Gold si les deux ont reussi ---
+  ObservatoireWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Name: workflow_observatoire
+
+  StartSilverTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: start_silver
+      Type: ON_DEMAND
+      WorkflowName: !Ref ObservatoireWorkflow
+      Actions:
+        - JobName: !Ref SilverDecpJob
+        - JobName: !Ref SilverSireneJob
+
+  StartGoldTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: start_gold
+      Type: CONDITIONAL
+      WorkflowName: !Ref ObservatoireWorkflow
+      StartOnCreation: true
+      Predicate:
+        Logical: AND
+        Conditions:
+          - JobName: !Ref SilverDecpJob
+            State: SUCCEEDED
+          - JobName: !Ref SilverSireneJob
+            State: SUCCEEDED
+      Actions:
+        - JobName: !Ref GoldFactContratJob
+
+  #--- Planification (desactivee par defaut : demontre la capacite sans tourner en continu) ---
+  DecpDailySchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ingestion_decp_daily
+      Description: Ingestion DECP quotidienne
+      ScheduleExpression: "cron(0 6 * * ? *)"
+      State: DISABLED
+      Targets:
+        - Id: decp
+          Arn: !GetAtt IngestionBronzeFunction.Arn
+          Input: '{"source": "decp"}'
+
+  SireneMonthlySchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ingestion_sirene_monthly
+      Description: Ingestion Sirene mensuelle (1er du mois)
+      ScheduleExpression: "cron(0 6 1 * ? *)"
+      State: DISABLED
+      Targets:
+        - Id: sirene_unite_legale
+          Arn: !GetAtt IngestionBronzeFunction.Arn
+          Input: '{"source": "sirene_unite_legale"}'
+        - Id: sirene_etablissement
+          Arn: !GetAtt IngestionBronzeFunction.Arn
+          Input: '{"source": "sirene_etablissement"}'
+
+  DecpScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionBronzeFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DecpDailySchedule.Arn
+
+  SireneScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionBronzeFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SireneMonthlySchedule.Arn
+
+Outputs:
+  LambdaFunctionName:
+    Value: !Ref IngestionBronzeFunction
+  GlueWorkflowName:
+    Value: !Ref ObservatoireWorkflow
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
